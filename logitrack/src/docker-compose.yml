@@ -1,0 +1,196 @@
+version: "3.9"
+
+#git — Ambiente local de desenvolvimento
+# Emula a arquitetura GCP com containers Docker
+# Uso: docker compose up --build
+
+services:
+
+  # ── API Gateway ────────────────────────────────────────────────────────────
+  api-gateway:
+    image: kong:3.6-ubuntu
+    container_name: logitrack-gateway
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /kong/declarative/kong.yml
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_ADMIN_ACCESS_LOG: /dev/stdout
+    ports:
+      - "8000:8000"   # proxy
+      - "8001:8001"   # admin API
+    volumes:
+      - ./infra/kong/kong.yml:/kong/declarative/kong.yml:ro
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    networks: [logitrack-net]
+
+  # ── Authorization Server ────────────────────────────────────────────────────
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    container_name: logitrack-keycloak
+    command: start-dev --import-realm
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./infra/keycloak/realm-logitrack.json:/opt/keycloak/data/import/realm-logitrack.json:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [logitrack-net]
+
+  # ── Serviço de Rotas ────────────────────────────────────────────────────────
+  svc-rotas:
+    build: ./src/svc-rotas
+    container_name: logitrack-svc-rotas
+    environment:
+      GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY}
+      DATABASE_URL: postgresql://rotas_user:rotas_pass@db-rotas:5432/logitrack_rotas
+      REDIS_URL: redis://redis:6379/0
+      KEYCLOAK_URL: http://keycloak:8080
+    ports:
+      - "8002:8000"
+    depends_on:
+      db-rotas:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      keycloak:
+        condition: service_healthy
+    networks: [logitrack-net]
+
+  # ── Serviço de Frota ────────────────────────────────────────────────────────
+  svc-frota:
+    build: ./src/svc-frota
+    container_name: logitrack-svc-frota
+    environment:
+      DATABASE_URL: postgresql://frota_user:frota_pass@db-frota:5432/logitrack_frota
+      KEYCLOAK_URL: http://keycloak:8080
+    ports:
+      - "8003:3000"
+    depends_on:
+      db-frota:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    networks: [logitrack-net]
+
+  # ── Serviço de Entregas ─────────────────────────────────────────────────────
+  svc-entregas:
+    build: ./src/svc-entregas
+    container_name: logitrack-svc-entregas
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db-entregas:5432/logitrack_entregas
+      SPRING_DATASOURCE_USERNAME: entregas_user
+      SPRING_DATASOURCE_PASSWORD: entregas_pass
+      PUBSUB_EMULATOR_HOST: pubsub-emulator:8085
+      KEYCLOAK_URL: http://keycloak:8080
+    ports:
+      - "8004:8080"
+    depends_on:
+      db-entregas:
+        condition: service_healthy
+      pubsub-emulator:
+        condition: service_started
+    networks: [logitrack-net]
+
+  # ── Serviço de Notificações ─────────────────────────────────────────────────
+  svc-notificacoes:
+    build: ./src/svc-notificacoes
+    container_name: logitrack-svc-notificacoes
+    environment:
+      PUBSUB_EMULATOR_HOST: pubsub-emulator:8085
+      KEYCLOAK_URL: http://keycloak:8080
+    ports:
+      - "8005:3000"
+    depends_on:
+      pubsub-emulator:
+        condition: service_started
+    networks: [logitrack-net]
+
+  # ── Bancos de dados isolados (database per service) ─────────────────────────
+  db-rotas:
+    image: postgres:16-alpine
+    container_name: logitrack-db-rotas
+    environment:
+      POSTGRES_DB: logitrack_rotas
+      POSTGRES_USER: rotas_user
+      POSTGRES_PASSWORD: rotas_pass
+    volumes:
+      - vol-db-rotas:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rotas_user -d logitrack_rotas"]
+      interval: 5s
+      retries: 5
+    networks: [logitrack-net]
+
+  db-frota:
+    image: postgres:16-alpine
+    container_name: logitrack-db-frota
+    environment:
+      POSTGRES_DB: logitrack_frota
+      POSTGRES_USER: frota_user
+      POSTGRES_PASSWORD: frota_pass
+    volumes:
+      - vol-db-frota:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U frota_user -d logitrack_frota"]
+      interval: 5s
+      retries: 5
+    networks: [logitrack-net]
+
+  db-entregas:
+    image: postgres:16-alpine
+    container_name: logitrack-db-entregas
+    environment:
+      POSTGRES_DB: logitrack_entregas
+      POSTGRES_USER: entregas_user
+      POSTGRES_PASSWORD: entregas_pass
+    volumes:
+      - vol-db-entregas:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U entregas_user -d logitrack_entregas"]
+      interval: 5s
+      retries: 5
+    networks: [logitrack-net]
+
+  # ── Redis (Cache + JWT blocklist) ────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: logitrack-redis
+    ports:
+      - "6379:6379"
+    networks: [logitrack-net]
+
+  # ── Google Cloud Pub/Sub Emulator ────────────────────────────────────────────
+  pubsub-emulator:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    container_name: logitrack-pubsub
+    command: gcloud beta emulators pubsub start --host-port=0.0.0.0:8085
+    ports:
+      - "8085:8085"
+    networks: [logitrack-net]
+
+  # ── Dashboard Web ────────────────────────────────────────────────────────────
+  frontend:
+    build: ./src/frontend
+    container_name: logitrack-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - api-gateway
+    networks: [logitrack-net]
+
+volumes:
+  vol-db-rotas:
+  vol-db-frota:
+  vol-db-entregas:
+
+networks:
+  logitrack-net:
+    driver: bridge

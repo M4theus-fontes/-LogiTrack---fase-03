@@ -1,0 +1,43 @@
+# Dependências
+node_modules/
+__pycache__/
+*.pyc
+target/
+.gradle/
+build/
+
+# Variáveis de ambiente
+.env
+.env.local
+.env.production
+*.env
+
+# Formatos não aceitos pela entrega
+*.docx
+*.pptx
+*.xls
+*.xlsx
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDEs
+.idea/
+.vscode/
+*.iml
+*.suo
+*.user
+
+# Logs
+*.log
+logs/
+
+# Docker
+docker-compose.override.yml
+
+# Credenciais GCP (NUNCA commitar)
+*.json
+service-account*.json
+gcp-credentials*.json
